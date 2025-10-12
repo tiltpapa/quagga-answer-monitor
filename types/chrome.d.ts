@@ -4,6 +4,73 @@
  */
 
 declare namespace chrome {
+  namespace runtime {
+    interface MessageSender {
+      tab?: chrome.tabs.Tab;
+      frameId?: number;
+      id?: string;
+      url?: string;
+      tlsChannelId?: string;
+    }
+
+    interface Port {
+      name: string;
+      disconnect(): void;
+      onDisconnect: chrome.events.Event<(port: Port) => void>;
+      onMessage: chrome.events.Event<(message: any, port: Port) => void>;
+      postMessage(message: any): void;
+      sender?: MessageSender;
+    }
+
+    interface MessageEvent {
+      addListener(callback: (message: any, sender: MessageSender, sendResponse: (response?: any) => void) => boolean | void): void;
+      removeListener(callback: (message: any, sender: MessageSender, sendResponse: (response?: any) => void) => boolean | void): void;
+    }
+
+    const onMessage: MessageEvent;
+    
+    function sendMessage(message: any): Promise<any>;
+    function sendMessage(extensionId: string, message: any): Promise<any>;
+  }
+
+  namespace events {
+    interface Event<T extends Function> {
+      addListener(callback: T): void;
+      removeListener(callback: T): void;
+      hasListener(callback: T): boolean;
+    }
+  }
+
+  namespace tabs {
+    interface Tab {
+      id?: number;
+      index: number;
+      windowId: number;
+      openerTabId?: number;
+      selected: boolean;
+      highlighted: boolean;
+      active: boolean;
+      pinned: boolean;
+      audible?: boolean;
+      discarded: boolean;
+      autoDiscardable: boolean;
+      mutedInfo?: MutedInfo;
+      url?: string;
+      title?: string;
+      favIconUrl?: string;
+      status?: string;
+      incognito: boolean;
+      width?: number;
+      height?: number;
+      sessionId?: string;
+    }
+
+    interface MutedInfo {
+      muted: boolean;
+      reason?: string;
+      extensionId?: string;
+    }
+  }
   namespace storage {
     interface StorageChange {
       oldValue?: any;
