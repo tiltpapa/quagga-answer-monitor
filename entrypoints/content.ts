@@ -11,6 +11,12 @@ import type { AnswerRightData, WatchedName, Message, StatusUpdateMessage, Answer
 export default defineContentScript({
   matches: ['*://quagga.studio/*'],
   main() {
+    // ドメイン制限の実装 - 要件: 1.1, 4.4
+    if (!isValidDomain()) {
+      console.log('Quagga Monitor: Invalid domain, script will not execute');
+      return;
+    }
+
     console.log('Quagga Monitor Content Script loaded');
     
     // QuaggaMonitorクラスのインスタンスを作成して監視開始
@@ -18,6 +24,19 @@ export default defineContentScript({
     monitor.initialize();
   },
 });
+
+/**
+ * 有効なドメインかどうかをチェック
+ * 要件: 1.1, 4.4
+ */
+function isValidDomain(): boolean {
+  const hostname = window.location.hostname;
+  const validDomains = ['quagga.studio'];
+  
+  return validDomains.some(domain => 
+    hostname === domain || hostname.endsWith('.' + domain)
+  );
+}
 
 /**
  * Quaggaサイトの回答権監視を行うメインクラス
@@ -28,6 +47,14 @@ class QuaggaMonitor {
   private isMonitoring = false;
   private throttleTimer: number | null = null;
   private readonly THROTTLE_DELAY = 500; // 500ms
+  
+  // パフォーマンス最適化のための追加プロパティ - 要件: 5.1, 5.2
+  private lastScanResults: AnswerRightData[] = [];
+  private scanCount = 0;
+  private readonly MAX_SCAN_HISTORY = 10;
+  private readonly MEMORY_CLEANUP_INTERVAL = 60000; // 1分
+  private memoryCleanupTimer: number | null = null;
+  private readonly EFFICIENT_SEARCH_THRESHOLD = 50; // 50人以上で効率的検索を使用
 
   /**
    * 監視システムの初期化
@@ -45,17 +72,20 @@ class QuaggaMonitor {
       
       // Background Scriptからのメッセージリスナー設定
       this.setupMessageListener();
+
+      // メモリクリーンアップタイマーを開始
+      this.startMemoryCleanup();
       
       console.log('Quagga Monitor initialized successfully');
     } catch (error) {
       console.error('Failed to initialize Quagga Monitor:', error);
-      this.sendErrorMessage('初期化に失敗しました', error);
+      this.handleError('初期化エラー', '監視システムの初期化に失敗しました', error);
     }
   }
 
   /**
-   * DOM要素スクレイピング機能の実装
-   * 要件: 1.2, 1.3, 1.4
+   * DOM要素スクレイピング機能の実装（パフォーマンス最適化版）
+   * 要件: 1.2, 1.3, 1.4, 5.1, 5.2
    */
   extractAnswerRights(): AnswerRightData[] {
     const results: AnswerRightData[] = [];
@@ -79,44 +109,141 @@ class QuaggaMonitor {
       // テーブル内の各行を処理
       const rightElements = rightsTable.querySelectorAll('._right_1treo_151');
       
-      rightElements.forEach((rightElement) => {
-        try {
-          // 名前要素を検索
-          const nameElement = rightElement.querySelector('._name_1treo_160');
-          if (!nameElement) {
-            return; // 名前要素が見つからない場合はスキップ
-          }
+      // 効率的な検索を使用するかどうかを判定
+      const useEfficientSearch = rightElements.length > this.EFFICIENT_SEARCH_THRESHOLD;
+      
+      if (useEfficientSearch) {
+        // 大量の参加者がいる場合は効率的な検索を使用
+        this.extractWithEfficientSearch(rightElements, results, timestamp);
+      } else {
+        // 通常の検索を使用
+        this.extractWithNormalSearch(rightElements, results, timestamp);
+      }
 
-          const name = nameElement.textContent?.trim();
-          if (!name) {
-            return; // 名前が空の場合はスキップ
-          }
-
-          // 回答権の状況を判定（background色で判定）
-          const computedStyle = window.getComputedStyle(rightElement);
-          const backgroundColor = computedStyle.backgroundColor;
-          
-          // 白色（rgb(255, 255, 255)またはwhite）の場合は回答権あり
-          const hasRight = this.isWhiteBackground(backgroundColor);
-
-          results.push({
-            name,
-            hasRight,
-            timestamp
-          });
-
-          console.log(`Extracted: ${name} - ${hasRight ? '回答権あり' : '回答権なし'}`);
-        } catch (error) {
-          console.error('Error processing right element:', error);
-        }
-      });
+      // スキャン結果をキャッシュ（メモリ管理のため最新のもののみ保持）
+      this.lastScanResults = results.slice(); // シャローコピー
+      this.scanCount++;
 
     } catch (error) {
       console.error('Error during DOM extraction:', error);
-      this.sendErrorMessage('DOM要素の抽出中にエラーが発生しました', error);
+      this.handleError('DOM抽出エラー', 'DOM要素の抽出中にエラーが発生しました', error);
     }
 
     return results;
+  }
+
+  /**
+   * 通常の検索処理
+   */
+  private extractWithNormalSearch(rightElements: NodeListOf<Element>, results: AnswerRightData[], timestamp: number): void {
+    rightElements.forEach((rightElement) => {
+      try {
+        const extractedData = this.extractSingleElement(rightElement, timestamp);
+        if (extractedData) {
+          results.push(extractedData);
+        }
+      } catch (error) {
+        console.error('Error processing right element:', error);
+        this.handleError('DOM処理エラー', '回答権要素の処理中にエラーが発生しました', error);
+      }
+    });
+  }
+
+  /**
+   * 効率的な検索処理（大量の参加者向け）
+   */
+  private extractWithEfficientSearch(rightElements: NodeListOf<Element>, results: AnswerRightData[], timestamp: number): void {
+    // 監視対象名前がない場合は処理をスキップ
+    if (this.watchedNames.length === 0) {
+      console.log('No watched names configured, skipping efficient search');
+      return;
+    }
+
+    // 監視対象名前のセットを作成（高速検索用）
+    const watchedNameSet = new Set(
+      this.watchedNames
+        .filter(wn => wn.enabled)
+        .map(wn => wn.exactMatch ? wn.name : wn.name.toLowerCase())
+    );
+
+    // 部分一致用の配列
+    const partialMatchNames = this.watchedNames
+      .filter(wn => wn.enabled && !wn.exactMatch)
+      .map(wn => wn.name.toLowerCase());
+
+    for (let i = 0; i < rightElements.length; i++) {
+      try {
+        const rightElement = rightElements[i];
+        const nameElement = rightElement.querySelector('._name_1treo_160');
+        
+        if (!nameElement) continue;
+        
+        const name = nameElement.textContent?.trim();
+        if (!name) continue;
+
+        // 効率的な名前マッチング
+        const isMatched = this.isNameMatchedEfficient(name, watchedNameSet, partialMatchNames);
+        
+        if (isMatched) {
+          const extractedData = this.extractSingleElement(rightElement, timestamp);
+          if (extractedData) {
+            results.push(extractedData);
+          }
+        }
+      } catch (error) {
+        console.error('Error processing right element in efficient search:', error);
+      }
+    }
+
+    console.log(`Efficient search completed: ${results.length} matches found from ${rightElements.length} participants`);
+  }
+
+  /**
+   * 単一要素の抽出
+   */
+  private extractSingleElement(rightElement: Element, timestamp: number): AnswerRightData | null {
+    // 名前要素を検索
+    const nameElement = rightElement.querySelector('._name_1treo_160');
+    if (!nameElement) {
+      return null;
+    }
+
+    const name = nameElement.textContent?.trim();
+    if (!name) {
+      return null;
+    }
+
+    // 回答権の状況を判定（background色で判定）
+    const computedStyle = window.getComputedStyle(rightElement);
+    const backgroundColor = computedStyle.backgroundColor;
+    
+    // 白色（rgb(255, 255, 255)またはwhite）の場合は回答権あり
+    const hasRight = this.isWhiteBackground(backgroundColor);
+
+    return {
+      name,
+      hasRight,
+      timestamp
+    };
+  }
+
+  /**
+   * 効率的な名前マッチング
+   */
+  private isNameMatchedEfficient(name: string, exactMatchSet: Set<string>, partialMatchNames: string[]): boolean {
+    // 完全一致チェック
+    if (exactMatchSet.has(name)) {
+      return true;
+    }
+
+    // 部分一致チェック
+    const lowerName = name.toLowerCase();
+    if (exactMatchSet.has(lowerName)) {
+      return true;
+    }
+
+    // 部分一致の名前をチェック
+    return partialMatchNames.some(partialName => lowerName.includes(partialName));
   }
 
   /**
@@ -157,7 +284,7 @@ class QuaggaMonitor {
   }
 
   /**
-   * MutationObserverによるリアルタイム監視
+   * MutationObserverによるリアルタイム監視（パフォーマンス最適化版）
    * 要件: 3.4, 5.1
    */
   private startDOMObserver(): void {
@@ -173,39 +300,70 @@ class QuaggaMonitor {
       }
 
       this.throttleTimer = window.setTimeout(() => {
-        this.handleDOMChanges(mutations);
+        this.handleDOMChangesOptimized(mutations);
       }, this.THROTTLE_DELAY);
     });
 
-    // 監視対象の設定
-    this.observer.observe(document.body, {
+    // 監視対象を最適化（必要最小限の要素のみ監視）
+    const targetElement = document.querySelector('._rights-table_1treo_151') || document.body;
+    
+    this.observer.observe(targetElement, {
       childList: true,
       subtree: true,
       attributes: true,
       attributeFilter: ['class', 'style'] // クラスとスタイルの変更のみ監視
     });
 
-    console.log('DOM Observer started');
+    console.log('Optimized DOM Observer started, monitoring:', targetElement.tagName);
   }
 
   /**
-   * DOM変更の処理
+   * DOM変更の処理（最適化版）
    */
-  private handleDOMChanges(mutations: MutationRecord[]): void {
-    let shouldRescan = false;
+  private handleDOMChangesOptimized(mutations: MutationRecord[]): void {
+    // 変更の重要度を評価
+    const changeAnalysis = this.analyzeMutations(mutations);
+    
+    if (changeAnalysis.shouldRescan) {
+      console.log(`Relevant DOM change detected (${changeAnalysis.changeType}), performing rescan`);
+      this.performScan();
+    } else {
+      console.log('DOM change detected but not relevant for monitoring');
+    }
+  }
+
+  /**
+   * Mutationの分析（パフォーマンス最適化）
+   */
+  private analyzeMutations(mutations: MutationRecord[]): { shouldRescan: boolean; changeType: string } {
+    let hasRelevantChange = false;
+    let changeType = 'none';
+    let relevantChangeCount = 0;
 
     for (const mutation of mutations) {
-      // 関連する要素の変更かチェック
       if (this.isRelevantChange(mutation)) {
-        shouldRescan = true;
-        break;
+        hasRelevantChange = true;
+        relevantChangeCount++;
+        
+        // 変更タイプを特定
+        if (mutation.type === 'childList') {
+          changeType = 'structure';
+        } else if (mutation.type === 'attributes') {
+          changeType = 'style';
+        }
+
+        // 大量の変更がある場合は早期終了
+        if (relevantChangeCount > 10) {
+          changeType = 'bulk';
+          break;
+        }
       }
     }
 
-    if (shouldRescan) {
-      console.log('Relevant DOM change detected, performing rescan');
-      this.performScan();
-    }
+    return {
+      shouldRescan: hasRelevantChange,
+      changeType
+    };
   }
 
   /**
@@ -265,7 +423,7 @@ class QuaggaMonitor {
       this.sendStatusUpdate(matchedResults);
     } catch (error) {
       console.error('Error during scan:', error);
-      this.sendErrorMessage('スキャン中にエラーが発生しました', error);
+      this.handleError('スキャンエラー', 'スキャン中にエラーが発生しました', error);
     }
   }
 
@@ -316,6 +474,7 @@ class QuaggaMonitor {
     chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
       this.handleMessage(message).then(sendResponse).catch(error => {
         console.error('Error handling message:', error);
+        this.handleError('メッセージングエラー', 'メッセージの処理中にエラーが発生しました', error);
         sendResponse({ error: error.message });
       });
       return true; // 非同期レスポンスを示す
@@ -364,15 +523,59 @@ class QuaggaMonitor {
    */
   private stopMonitoring(): void {
     this.isMonitoring = false;
+    
+    // オブザーバーの停止
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
     }
+    
+    // タイマーのクリーンアップ
     if (this.throttleTimer) {
       clearTimeout(this.throttleTimer);
       this.throttleTimer = null;
     }
-    console.log('Monitoring stopped');
+    
+    // メモリクリーンアップタイマーの停止
+    if (this.memoryCleanupTimer) {
+      clearInterval(this.memoryCleanupTimer);
+      this.memoryCleanupTimer = null;
+    }
+    
+    // メモリクリーンアップ
+    this.performMemoryCleanup();
+    
+    console.log('Monitoring stopped and memory cleaned up');
+  }
+
+  /**
+   * メモリクリーンアップの開始 - 要件: 5.1, 5.2
+   */
+  private startMemoryCleanup(): void {
+    this.memoryCleanupTimer = window.setInterval(() => {
+      this.performMemoryCleanup();
+    }, this.MEMORY_CLEANUP_INTERVAL);
+  }
+
+  /**
+   * メモリクリーンアップの実行
+   */
+  private performMemoryCleanup(): void {
+    try {
+      // 古いスキャン結果をクリア
+      if (this.lastScanResults.length > this.MAX_SCAN_HISTORY) {
+        this.lastScanResults = this.lastScanResults.slice(-this.MAX_SCAN_HISTORY);
+      }
+
+      // スキャンカウントのリセット（オーバーフロー防止）
+      if (this.scanCount > 10000) {
+        this.scanCount = 0;
+      }
+
+      console.log(`Memory cleanup performed. Scan count: ${this.scanCount}, Cached results: ${this.lastScanResults.length}`);
+    } catch (error) {
+      console.error('Error during memory cleanup:', error);
+    }
   }
 
   /**
@@ -383,9 +586,12 @@ class QuaggaMonitor {
       const response = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
       if (response && response.watchedNames) {
         this.watchedNames = response.watchedNames;
+      } else if (response && response.error) {
+        throw new Error(response.error);
       }
     } catch (error) {
       console.error('Failed to load settings:', error);
+      this.handleError('ストレージエラー', '設定の読み込みに失敗しました', error);
       this.watchedNames = [];
     }
   }
@@ -423,5 +629,43 @@ class QuaggaMonitor {
     chrome.runtime.sendMessage(errorMessage).catch(err => {
       console.error('Failed to send error message:', err);
     });
+  }
+
+  /**
+   * 包括的エラーハンドリング - 要件: 5.3, 5.4
+   */
+  private handleError(category: string, userMessage: string, error: any): void {
+    const errorDetails = {
+      category,
+      userMessage,
+      technicalDetails: error?.message || String(error),
+      stack: error?.stack,
+      timestamp: new Date().toISOString(),
+      url: window.location.href,
+      userAgent: navigator.userAgent
+    };
+
+    console.error(`[${category}]`, errorDetails);
+
+    // Background Scriptにエラー情報を送信
+    this.sendErrorMessage(userMessage, errorDetails);
+
+    // 重要なエラーの場合は監視を一時停止
+    if (this.isCriticalError(category)) {
+      console.warn('Critical error detected, pausing monitoring');
+      this.isMonitoring = false;
+    }
+  }
+
+  /**
+   * 重要なエラーかどうかを判定
+   */
+  private isCriticalError(category: string): boolean {
+    const criticalCategories = [
+      '初期化エラー',
+      'ストレージエラー',
+      'メッセージングエラー'
+    ];
+    return criticalCategories.includes(category);
   }
 }

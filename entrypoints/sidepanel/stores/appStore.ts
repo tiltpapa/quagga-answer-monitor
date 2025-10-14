@@ -53,17 +53,24 @@ export class AppStore {
 
       // Background Scriptからの設定と状態を取得
       const [settings, monitorState] = await Promise.all([
-        messagingService.getSettings(),
-        messagingService.getStatus()
+        this.safeGetSettings(),
+        this.safeGetStatus()
       ]);
 
       // Background Scriptからのメッセージを受信
       this.unsubscribeMessage = messagingService.onMessage((message) => {
-        if (message.type === 'STATUS_UPDATE') {
-          appState.update(state => ({
-            ...state,
-            monitorState: message.payload
-          }));
+        try {
+          if (message.type === 'STATUS_UPDATE') {
+            appState.update(state => ({
+              ...state,
+              monitorState: message.payload
+            }));
+          } else if (message.type === 'ERROR') {
+            this.handleError('Background Scriptエラー', message.payload?.message || 'エラーが発生しました');
+          }
+        } catch (error) {
+          console.error('Error handling message:', error);
+          this.handleError('メッセージ処理エラー', 'メッセージの処理中にエラーが発生しました');
         }
       });
 
@@ -77,12 +84,7 @@ export class AppStore {
 
     } catch (error) {
       console.error('Failed to initialize app:', error);
-      appState.update(state => ({
-        ...state,
-        isLoading: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        isConnected: false
-      }));
+      this.handleError('初期化エラー', 'アプリケーションの初期化に失敗しました', error);
     }
   }
 
@@ -92,6 +94,12 @@ export class AppStore {
   async updateSettings(newSettings: Settings): Promise<void> {
     try {
       appState.update(state => ({ ...state, isLoading: true, error: null }));
+
+      // 設定のバリデーション
+      const validationResult = this.validateSettings(newSettings);
+      if (!validationResult.isValid) {
+        throw new Error(`設定が無効です: ${validationResult.errors.join(', ')}`);
+      }
 
       await messagingService.updateSettings(newSettings);
 
@@ -103,11 +111,7 @@ export class AppStore {
 
     } catch (error) {
       console.error('Failed to update settings:', error);
-      appState.update(state => ({
-        ...state,
-        isLoading: false,
-        error: error instanceof Error ? error.message : 'Failed to update settings'
-      }));
+      this.handleError('設定更新エラー', '設定の更新に失敗しました', error);
       throw error;
     }
   }
@@ -166,12 +170,13 @@ export class AppStore {
   async startMonitoring(): Promise<void> {
     try {
       await messagingService.startMonitoring();
-    } catch (error) {
-      console.error('Failed to start monitoring:', error);
       appState.update(state => ({
         ...state,
-        error: error instanceof Error ? error.message : 'Failed to start monitoring'
+        monitorState: { ...state.monitorState, isActive: true }
       }));
+    } catch (error) {
+      console.error('Failed to start monitoring:', error);
+      this.handleError('監視開始エラー', '監視の開始に失敗しました', error);
       throw error;
     }
   }
@@ -182,12 +187,13 @@ export class AppStore {
   async stopMonitoring(): Promise<void> {
     try {
       await messagingService.stopMonitoring();
-    } catch (error) {
-      console.error('Failed to stop monitoring:', error);
       appState.update(state => ({
         ...state,
-        error: error instanceof Error ? error.message : 'Failed to stop monitoring'
+        monitorState: { ...state.monitorState, isActive: false }
       }));
+    } catch (error) {
+      console.error('Failed to stop monitoring:', error);
+      this.handleError('監視停止エラー', '監視の停止に失敗しました', error);
       throw error;
     }
   }
@@ -232,11 +238,163 @@ export class AppStore {
    * クリーンアップ
    */
   cleanup(): void {
-    if (this.unsubscribeMessage) {
-      this.unsubscribeMessage();
-      this.unsubscribeMessage = null;
+    try {
+      if (this.unsubscribeMessage) {
+        this.unsubscribeMessage();
+        this.unsubscribeMessage = null;
+      }
+      messagingService.cleanup();
+    } catch (error) {
+      console.error('Error during cleanup:', error);
     }
-    messagingService.cleanup();
+  }
+
+  /**
+   * 包括的エラーハンドリング - 要件: 5.3, 5.4
+   */
+  private handleError(category: string, userMessage: string, error?: any): void {
+    const errorDetails = {
+      category,
+      userMessage,
+      technicalDetails: error?.message || String(error),
+      stack: error?.stack,
+      timestamp: new Date().toISOString(),
+      context: 'side_panel'
+    };
+
+    console.error(`[${category}]`, errorDetails);
+
+    // ユーザーフレンドリーなエラーメッセージを表示
+    const displayMessage = this.getUserFriendlyErrorMessage(category, userMessage);
+    
+    appState.update(state => ({
+      ...state,
+      isLoading: false,
+      error: displayMessage,
+      isConnected: !this.isCriticalError(category)
+    }));
+
+    // 重要なエラーの場合は追加処理
+    if (this.isCriticalError(category)) {
+      this.handleCriticalError(category, errorDetails);
+    }
+  }
+
+  /**
+   * ユーザーフレンドリーなエラーメッセージを生成
+   */
+  private getUserFriendlyErrorMessage(category: string, originalMessage: string): string {
+    const errorMessages: Record<string, string> = {
+      '初期化エラー': 'アプリケーションの初期化に失敗しました。ページを再読み込みしてください。',
+      '設定更新エラー': '設定の保存に失敗しました。もう一度お試しください。',
+      '監視開始エラー': '監視の開始に失敗しました。Quaggaサイトが開いているか確認してください。',
+      '監視停止エラー': '監視の停止に失敗しました。',
+      'メッセージ処理エラー': '通信エラーが発生しました。ページを再読み込みしてください。',
+      'Background Scriptエラー': 'システムエラーが発生しました。',
+      'ストレージエラー': 'データの保存に失敗しました。ブラウザの設定を確認してください。'
+    };
+
+    return errorMessages[category] || originalMessage;
+  }
+
+  /**
+   * 重要なエラーかどうかを判定
+   */
+  private isCriticalError(category: string): boolean {
+    const criticalCategories = [
+      '初期化エラー',
+      'メッセージ処理エラー',
+      'ストレージエラー'
+    ];
+    return criticalCategories.includes(category);
+  }
+
+  /**
+   * 重要なエラーの処理
+   */
+  private handleCriticalError(category: string, errorDetails: any): void {
+    console.warn('Critical error detected in side panel:', category);
+    
+    // 接続状態を切断に設定
+    appState.update(state => ({
+      ...state,
+      isConnected: false
+    }));
+
+    // 必要に応じて自動復旧を試行
+    if (category === '初期化エラー') {
+      setTimeout(() => {
+        console.log('Attempting automatic recovery...');
+        this.initialize().catch(error => {
+          console.error('Automatic recovery failed:', error);
+        });
+      }, 5000);
+    }
+  }
+
+  /**
+   * 安全な設定取得
+   */
+  private async safeGetSettings(): Promise<Settings> {
+    try {
+      return await messagingService.getSettings();
+    } catch (error) {
+      console.error('Failed to get settings, using defaults:', error);
+      return DEFAULT_SETTINGS;
+    }
+  }
+
+  /**
+   * 安全な状態取得
+   */
+  private async safeGetStatus(): Promise<MonitorState> {
+    try {
+      return await messagingService.getStatus();
+    } catch (error) {
+      console.error('Failed to get status, using defaults:', error);
+      return {
+        statuses: [],
+        isActive: false,
+        lastScan: 0
+      };
+    }
+  }
+
+  /**
+   * 設定のバリデーション
+   */
+  private validateSettings(settings: Settings): { isValid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    if (!settings || typeof settings !== 'object') {
+      errors.push('設定オブジェクトが無効です');
+      return { isValid: false, errors };
+    }
+
+    if (!Array.isArray(settings.watchedNames)) {
+      errors.push('監視対象名前リストが無効です');
+    } else {
+      settings.watchedNames.forEach((watchedName, index) => {
+        if (!watchedName.name || typeof watchedName.name !== 'string' || watchedName.name.trim() === '') {
+          errors.push(`監視対象名前[${index}]: 名前が無効です`);
+        }
+        if (typeof watchedName.exactMatch !== 'boolean') {
+          errors.push(`監視対象名前[${index}]: 完全一致フラグが無効です`);
+        }
+        if (typeof watchedName.enabled !== 'boolean') {
+          errors.push(`監視対象名前[${index}]: 有効フラグが無効です`);
+        }
+      });
+    }
+
+    if (typeof settings.refreshInterval !== 'number' || settings.refreshInterval < 100) {
+      errors.push('更新間隔が無効です');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
   }
 }
 

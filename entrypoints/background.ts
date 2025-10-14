@@ -35,6 +35,17 @@ export default defineBackground(() => {
 class BackgroundService {
   private storageManager: StorageManager;
   private currentState: MonitorState;
+  
+  // パフォーマンス最適化のための追加プロパティ - 要件: 5.1, 5.2
+  private messageQueue: Message[] = [];
+  private readonly MAX_MESSAGE_QUEUE_SIZE = 100;
+  private batchProcessingTimer: number | null = null;
+  private readonly BATCH_PROCESSING_DELAY = 100; // 100ms
+  private performanceMetrics = {
+    messageCount: 0,
+    averageResponseTime: 0,
+    lastCleanup: Date.now()
+  };
 
   constructor() {
     this.storageManager = StorageManager.getInstance();
@@ -59,9 +70,16 @@ class BackgroundService {
       // ストレージ変更リスナーを設定
       this.setupStorageListener();
       
+      // グローバルエラーハンドラーを設定
+      this.setupGlobalErrorHandlers();
+
+      // パフォーマンス監視を開始
+      this.startPerformanceMonitoring();
+      
       console.log('Background Service initialized successfully');
     } catch (error) {
       console.error('Failed to initialize Background Service:', error);
+      this.handleCriticalError('初期化エラー', '背景スクリプトの初期化に失敗しました', error);
     }
   }
 
@@ -81,6 +99,7 @@ class BackgroundService {
         })
         .catch(error => {
           console.error('Error handling message:', error);
+          this.handleInternalError('メッセージングエラー', 'メッセージの処理中にエラーが発生しました', error);
           sendResponse({ 
             error: error.message || 'Unknown error occurred',
             success: false 
@@ -93,35 +112,57 @@ class BackgroundService {
   }
 
   /**
-   * メッセージタイプ別の処理分岐
-   * 要件: 3.4, 5.3
+   * メッセージタイプ別の処理分岐（パフォーマンス最適化版）
+   * 要件: 3.4, 5.3, 5.1, 5.2
    */
   private async handleMessage(message: Message, sender: chrome.runtime.MessageSender): Promise<any> {
-    switch (message.type) {
-      case 'GET_SETTINGS':
-        return await this.handleGetSettings(message as GetSettingsMessage);
+    const startTime = performance.now();
+    
+    try {
+      let result: any;
 
-      case 'UPDATE_SETTINGS':
-        return await this.handleUpdateSettings(message as UpdateSettingsMessage);
+      switch (message.type) {
+        case 'GET_SETTINGS':
+          result = await this.handleGetSettings(message as GetSettingsMessage);
+          break;
 
-      case 'GET_STATUS':
-        return await this.handleGetStatus(message as GetStatusMessage);
+        case 'UPDATE_SETTINGS':
+          result = await this.handleUpdateSettings(message as UpdateSettingsMessage);
+          break;
 
-      case 'STATUS_UPDATE':
-        return await this.handleStatusUpdate(message as StatusUpdateMessage, sender);
+        case 'GET_STATUS':
+          result = await this.handleGetStatus(message as GetStatusMessage);
+          break;
 
-      case 'START_MONITORING':
-        return await this.handleStartMonitoring(message as StartMonitoringMessage);
+        case 'STATUS_UPDATE':
+          result = await this.handleStatusUpdateOptimized(message as StatusUpdateMessage, sender);
+          break;
 
-      case 'STOP_MONITORING':
-        return await this.handleStopMonitoring(message as StopMonitoringMessage);
+        case 'START_MONITORING':
+          result = await this.handleStartMonitoring(message as StartMonitoringMessage);
+          break;
 
-      case 'ERROR':
-        return await this.handleError(message as ErrorMessage, sender);
+        case 'STOP_MONITORING':
+          result = await this.handleStopMonitoring(message as StopMonitoringMessage);
+          break;
 
-      default:
-        console.warn('Unknown message type:', message.type);
-        throw new Error(`Unknown message type: ${message.type}`);
+        case 'ERROR':
+          result = await this.handleError(message as ErrorMessage, sender);
+          break;
+
+        default:
+          console.warn('Unknown message type:', message.type);
+          throw new Error(`Unknown message type: ${message.type}`);
+      }
+
+      // パフォーマンスメトリクスを更新
+      this.updatePerformanceMetrics(startTime);
+      
+      return result;
+    } catch (error) {
+      // エラーの場合もメトリクスを更新
+      this.updatePerformanceMetrics(startTime);
+      throw error;
     }
   }
 
@@ -135,6 +176,7 @@ class BackgroundService {
       return settings;
     } catch (error) {
       console.error('Failed to get settings:', error);
+      this.handleInternalError('ストレージエラー', '設定の取得に失敗しました', error);
       throw new Error('設定の取得に失敗しました');
     }
   }
@@ -164,6 +206,7 @@ class BackgroundService {
       }
     } catch (error) {
       console.error('Failed to update settings:', error);
+      this.handleInternalError('ストレージエラー', '設定の更新に失敗しました', error);
       return {
         success: false,
         errors: ['設定の更新に失敗しました']
@@ -216,6 +259,180 @@ class BackgroundService {
     } catch (error) {
       console.error('Failed to handle status update:', error);
       throw new Error('状況更新の処理に失敗しました');
+    }
+  }
+
+  /**
+   * 最適化された状況更新処理 - 要件: 5.1, 5.2
+   */
+  private async handleStatusUpdateOptimized(message: StatusUpdateMessage, sender: chrome.runtime.MessageSender): Promise<{ success: boolean }> {
+    try {
+      if (!message.payload) {
+        throw new Error('状況データが提供されていません');
+      }
+
+      // Content Scriptからの更新のみ受け入れる
+      if (!sender.tab) {
+        console.warn('Status update from non-content script ignored');
+        return { success: false };
+      }
+
+      // 状態の変更を検出（不要な更新を避ける）
+      const hasSignificantChange = this.hasSignificantStateChange(message.payload);
+      
+      if (!hasSignificantChange) {
+        console.log('No significant state change detected, skipping update');
+        return { success: true };
+      }
+
+      // 現在の状態を更新
+      this.currentState = {
+        ...this.currentState,
+        ...message.payload
+      };
+
+      // バッチ処理でストレージ更新を最適化
+      await this.batchStorageUpdate();
+
+      // Side Panelに状況変更を通知（throttling付き）
+      await this.notifySidePanelStatusUpdateThrottled(this.currentState);
+
+      console.log('Optimized status updated:', this.currentState);
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to handle optimized status update:', error);
+      throw new Error('状況更新の処理に失敗しました');
+    }
+  }
+
+  /**
+   * 重要な状態変更があるかチェック
+   */
+  private hasSignificantStateChange(newPayload: any): boolean {
+    // アクティブ状態の変更は常に重要
+    if (newPayload.isActive !== this.currentState.isActive) {
+      return true;
+    }
+
+    // 状況の変更をチェック
+    if (newPayload.statuses && Array.isArray(newPayload.statuses)) {
+      const currentStatuses = this.currentState.statuses || [];
+      
+      // 状況数の変更
+      if (newPayload.statuses.length !== currentStatuses.length) {
+        return true;
+      }
+
+      // 回答権の変更をチェック
+      for (let i = 0; i < newPayload.statuses.length; i++) {
+        const newStatus = newPayload.statuses[i];
+        const currentStatus = currentStatuses[i];
+        
+        if (!currentStatus || 
+            newStatus.hasRight !== currentStatus.hasRight ||
+            newStatus.found !== currentStatus.found) {
+          return true;
+        }
+      }
+    }
+
+    // 最後のスキャン時刻の大幅な変更（5秒以上）
+    const timeDiff = Math.abs((newPayload.lastScan || 0) - this.currentState.lastScan);
+    if (timeDiff > 5000) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * バッチ処理でストレージ更新を最適化
+   */
+  private async batchStorageUpdate(): Promise<void> {
+    // バッチ処理タイマーをクリア
+    if (this.batchProcessingTimer) {
+      clearTimeout(this.batchProcessingTimer);
+    }
+
+    // 遅延実行でバッチ処理
+    this.batchProcessingTimer = window.setTimeout(async () => {
+      try {
+        await this.storageManager.saveMonitorState(this.currentState);
+        console.log('Batch storage update completed');
+      } catch (error) {
+        console.error('Batch storage update failed:', error);
+      }
+    }, this.BATCH_PROCESSING_DELAY);
+  }
+
+  /**
+   * Throttling付きSide Panel通知
+   */
+  private lastNotificationTime = 0;
+  private readonly NOTIFICATION_THROTTLE_DELAY = 200; // 200ms
+
+  private async notifySidePanelStatusUpdateThrottled(state: MonitorState): Promise<void> {
+    const now = Date.now();
+    
+    if (now - this.lastNotificationTime < this.NOTIFICATION_THROTTLE_DELAY) {
+      console.log('Side panel notification throttled');
+      return;
+    }
+
+    this.lastNotificationTime = now;
+    await this.notifySidePanelStatusUpdate(state);
+  }
+
+  /**
+   * パフォーマンス監視の開始 - 要件: 5.1, 5.2
+   */
+  private startPerformanceMonitoring(): void {
+    // 定期的なパフォーマンスメトリクスのクリーンアップ
+    setInterval(() => {
+      this.cleanupPerformanceMetrics();
+    }, 300000); // 5分ごと
+  }
+
+  /**
+   * パフォーマンスメトリクスの更新
+   */
+  private updatePerformanceMetrics(startTime: number): void {
+    const responseTime = performance.now() - startTime;
+    this.performanceMetrics.messageCount++;
+    
+    // 移動平均でレスポンス時間を計算
+    const alpha = 0.1; // 平滑化係数
+    this.performanceMetrics.averageResponseTime = 
+      (1 - alpha) * this.performanceMetrics.averageResponseTime + alpha * responseTime;
+
+    // パフォーマンスが悪化している場合は警告
+    if (responseTime > 1000) { // 1秒以上
+      console.warn(`Slow message processing detected: ${responseTime.toFixed(2)}ms`);
+    }
+  }
+
+  /**
+   * パフォーマンスメトリクスのクリーンアップ
+   */
+  private cleanupPerformanceMetrics(): void {
+    const now = Date.now();
+    const timeSinceLastCleanup = now - this.performanceMetrics.lastCleanup;
+    
+    console.log('Performance metrics:', {
+      messageCount: this.performanceMetrics.messageCount,
+      averageResponseTime: this.performanceMetrics.averageResponseTime.toFixed(2) + 'ms',
+      timeSinceLastCleanup: (timeSinceLastCleanup / 1000).toFixed(1) + 's'
+    });
+
+    // メトリクスをリセット
+    this.performanceMetrics.messageCount = 0;
+    this.performanceMetrics.averageResponseTime = 0;
+    this.performanceMetrics.lastCleanup = now;
+
+    // メッセージキューのクリーンアップ
+    if (this.messageQueue.length > this.MAX_MESSAGE_QUEUE_SIZE) {
+      this.messageQueue = this.messageQueue.slice(-this.MAX_MESSAGE_QUEUE_SIZE / 2);
+      console.log('Message queue cleaned up');
     }
   }
 
@@ -963,8 +1180,13 @@ class BackgroundService {
   /**
    * 重大エラーの処理
    */
-  private async handleCriticalError(): Promise<void> {
+  private async handleCriticalError(category?: string, message?: string, error?: any): Promise<void> {
     try {
+      // エラー詳細をログに記録
+      if (category && message) {
+        this.recordError(`${category}: ${message}`, error);
+      }
+
       // 監視を停止
       await this.updateMonitorState({ isActive: false });
       
@@ -975,6 +1197,75 @@ class BackgroundService {
     } catch (error) {
       console.error('Failed to handle critical error:', error);
     }
+  }
+
+  /**
+   * グローバルエラーハンドラーの設定 - 要件: 5.3, 5.4
+   */
+  private setupGlobalErrorHandlers(): void {
+    // Chrome拡張機能のエラーハンドリング
+    if (chrome.runtime.onStartup) {
+      chrome.runtime.onStartup.addListener(() => {
+        console.log('Extension startup detected');
+        this.clearErrorState();
+      });
+    }
+
+    // 未処理のPromise拒否をキャッチ
+    if (typeof window !== 'undefined') {
+      window.addEventListener('unhandledrejection', (event) => {
+        console.error('Unhandled promise rejection:', event.reason);
+        this.handleInternalError('未処理エラー', 'Promise拒否が処理されませんでした', event.reason);
+        event.preventDefault();
+      });
+
+      // 未処理のエラーをキャッチ
+      window.addEventListener('error', (event) => {
+        console.error('Unhandled error:', event.error);
+        this.handleInternalError('未処理エラー', 'エラーが処理されませんでした', event.error);
+      });
+    }
+  }
+
+  /**
+   * エラーハンドリングの統一メソッド - 要件: 5.3, 5.4
+   */
+  private handleInternalError(category: string, userMessage: string, error: any): void {
+    const errorDetails = {
+      category,
+      userMessage,
+      technicalDetails: error?.message || String(error),
+      stack: error?.stack,
+      timestamp: new Date().toISOString(),
+      context: 'background_script'
+    };
+
+    console.error(`[${category}]`, errorDetails);
+
+    // エラー状態を記録
+    this.recordError(userMessage, errorDetails);
+
+    // 重要なエラーの場合は追加処理
+    if (this.isCriticalError(category)) {
+      console.warn('Critical error detected in background script');
+      // 必要に応じて監視を停止
+      if (this.errorState.errorCount >= 3) {
+        this.handleCriticalError();
+      }
+    }
+  }
+
+  /**
+   * 重要なエラーかどうかを判定
+   */
+  private isCriticalError(category: string): boolean {
+    const criticalCategories = [
+      '初期化エラー',
+      'ストレージエラー',
+      'メッセージングエラー',
+      '未処理エラー'
+    ];
+    return criticalCategories.includes(category);
   }
 
   /**
