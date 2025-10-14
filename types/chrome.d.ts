@@ -70,6 +70,27 @@ declare namespace chrome {
       reason?: string;
       extensionId?: string;
     }
+
+    interface QueryInfo {
+      active?: boolean;
+      audible?: boolean;
+      autoDiscardable?: boolean;
+      currentWindow?: boolean;
+      discarded?: boolean;
+      highlighted?: boolean;
+      index?: number;
+      lastFocusedWindow?: boolean;
+      muted?: boolean;
+      pinned?: boolean;
+      status?: string;
+      title?: string;
+      url?: string | string[];
+      windowId?: number;
+      windowType?: string;
+    }
+
+    function query(queryInfo: QueryInfo): Promise<Tab[]>;
+    function sendMessage(tabId: number, message: any): Promise<any>;
   }
   namespace storage {
     interface StorageChange {

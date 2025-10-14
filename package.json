@@ -1,4 +1,7 @@
 {
+  "name": "quagga-answer-monitor",
+  "version": "1.0.0",
+  "description": "Quagga回答権監視Chromeアドオン",
   "dependencies": {
     "wxt": "^0.20.11"
   }

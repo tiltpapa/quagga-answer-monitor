@@ -3,9 +3,10 @@
  * quagga.studioサイトでDOM要素をスクレイピングし、回答権の状況を監視する
  */
 
+/// <reference path="../types/chrome.d.ts" />
+/// <reference path="../types/wxt.d.ts" />
+
 import type { AnswerRightData, WatchedName, Message, StatusUpdateMessage, AnswerStatus } from '../types/index';
-import '../types/chrome';
-import '../types/wxt';
 
 export default defineContentScript({
   matches: ['*://quagga.studio/*'],
