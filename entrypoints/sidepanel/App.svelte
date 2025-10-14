@@ -8,6 +8,7 @@
   let activeTab: TabType = 'status';
 
   function switchTab(tab: TabType) {
+    if (activeTab === tab) return;
     activeTab = tab;
   }
 
@@ -84,7 +85,6 @@
           ? 'border-blue-500 text-blue-600 bg-blue-50' 
           : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}"
         on:click={() => switchTab('status')}
-        disabled={$isLoading}
       >
         状況表示
       </button>
@@ -93,7 +93,6 @@
           ? 'border-blue-500 text-blue-600 bg-blue-50' 
           : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}"
         on:click={() => switchTab('settings')}
-        disabled={$isLoading}
       >
         設定
       </button>
@@ -102,17 +101,16 @@
 
   <!-- タブコンテンツ -->
   <main class="flex-1 overflow-auto">
-    {#if $isLoading}
-      <div class="flex items-center justify-center h-full">
-        <div class="text-center">
-          <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p class="text-gray-500">読み込み中...</p>
-        </div>
-      </div>
-    {:else if activeTab === 'status'}
+    <!-- デバッグ用：ローディング状態を一時的に無視 -->
+    {#if activeTab === 'status'}
       <StatusTab />
     {:else if activeTab === 'settings'}
       <SettingsTab />
     {/if}
+    
+    <!-- デバッグ情報 -->
+    <div class="fixed bottom-2 right-2 bg-black text-white text-xs p-2 rounded opacity-50">
+      Loading: {$isLoading}, Connected: {$isConnected}, Error: {$error || 'none'}
+    </div>
   </main>
 </div>

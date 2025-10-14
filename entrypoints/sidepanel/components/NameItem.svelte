@@ -1,7 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { WatchedName } from '../../../types/index.js';
-  import { SettingsValidator } from '../../../utils/settings-validator.js';
 
   // Props
   export let watchedName: WatchedName;

@@ -223,10 +223,17 @@ export class AppStore {
   async getStatus(): Promise<MonitorState> {
     try {
       const monitorState = await messagingService.getStatus();
-      appState.update(state => ({
-        ...state,
-        monitorState
-      }));
+      // ストアの更新は必要な場合のみ行う
+      appState.update(state => {
+        // 状態に変化がある場合のみ更新
+        if (JSON.stringify(state.monitorState) !== JSON.stringify(monitorState)) {
+          return {
+            ...state,
+            monitorState
+          };
+        }
+        return state;
+      });
       return monitorState;
     } catch (error) {
       console.error('Failed to get status:', error);
