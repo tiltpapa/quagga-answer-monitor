@@ -1,6 +1,7 @@
 /**
  * テスト環境のセットアップ
  */
+import { vi } from 'vitest';
 
 // Chrome Extension APIのモック
 const mockChrome = {
@@ -23,7 +24,7 @@ const mockChrome = {
 (global as any).chrome = mockChrome;
 
 // WXTのdefineContentScriptのモック
-(global as any).defineContentScript = vi.fn((config) => config);
+(global as any).defineContentScript = vi.fn((config: any) => config);
 
 // コンソールのモック（テスト出力をクリーンに保つため）
 global.console = {

@@ -12,6 +12,7 @@
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
     "@wxt-dev/module-svelte": "^1.0.0",
     "autoprefixer": "^10.4.0",
+    "cssnano": "^6.0.0",
     "jsdom": "^23.0.0",
     "postcss": "^8.4.0",
     "svelte-check": "^3.6.0",
@@ -20,7 +21,13 @@
     "vitest": "^1.0.0"
   },
   "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "build:firefox": "wxt build --target firefox-mv2",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip --target firefox-mv2",
     "test": "vitest --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "type-check": "svelte-check --tsconfig ./.wxt/tsconfig.json"
   }
 }
