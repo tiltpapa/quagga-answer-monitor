@@ -4,5 +4,16 @@
   "description": "Quagga回答権監視Chromeアドオン",
   "dependencies": {
     "wxt": "^0.20.11"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^20.0.0",
+    "jsdom": "^23.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "test:watch": "vitest"
   }
 }
