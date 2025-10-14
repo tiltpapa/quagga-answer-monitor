@@ -212,6 +212,23 @@ export class AppStore {
   }
 
   /**
+   * 現在の監視状態を取得
+   */
+  async getStatus(): Promise<MonitorState> {
+    try {
+      const monitorState = await messagingService.getStatus();
+      appState.update(state => ({
+        ...state,
+        monitorState
+      }));
+      return monitorState;
+    } catch (error) {
+      console.error('Failed to get status:', error);
+      throw error;
+    }
+  }
+
+  /**
    * クリーンアップ
    */
   cleanup(): void {
