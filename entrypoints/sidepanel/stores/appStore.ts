@@ -337,7 +337,11 @@ export class AppStore {
    */
   private async safeGetSettings(): Promise<Settings> {
     try {
-      return await messagingService.getSettings();
+      console.log('AppStore: Getting settings...');
+      const settings = await messagingService.getSettings();
+      console.log('AppStore: Received settings:', settings);
+      console.log('AppStore: watchedNames count:', settings?.watchedNames?.length || 0);
+      return settings;
     } catch (error) {
       console.error('Failed to get settings, using defaults:', error);
       return DEFAULT_SETTINGS;
