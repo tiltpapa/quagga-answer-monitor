@@ -23,9 +23,9 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
-    "build:firefox": "wxt build --target firefox-mv2",
+    "build:firefox": "wxt -b firefox && wxt build --target firefox-mv2",
     "zip": "wxt zip",
-    "zip:firefox": "wxt zip --target firefox-mv2",
+    "zip:firefox": "wxt -b firefox && wxt zip --target firefox-mv2",
     "test": "vitest --run",
     "test:watch": "vitest",
     "type-check": "svelte-check --tsconfig ./.wxt/tsconfig.json"
