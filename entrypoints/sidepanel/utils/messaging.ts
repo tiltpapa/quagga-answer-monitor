@@ -44,10 +44,11 @@ export class MessagingService {
 
         if (chrome.runtime.lastError) {
           pending.reject(new Error(chrome.runtime.lastError.message));
-        } else if (response?.type === 'ERROR') {
-          pending.reject(new Error(response.payload?.message || 'Unknown error'));
+        } else if (response?.error) {
+          pending.reject(new Error(response.error));
         } else {
-          pending.resolve(response?.payload);
+          // Background Scriptからの直接レスポンスを処理
+          pending.resolve(response);
         }
       });
     });
@@ -57,7 +58,10 @@ export class MessagingService {
    * 設定を取得
    */
   async getSettings(): Promise<Settings> {
-    return this.sendMessage<Settings>('GET_SETTINGS');
+    console.log('MessagingService: Getting settings...');
+    const settings = await this.sendMessage<Settings>('GET_SETTINGS');
+    console.log('MessagingService: Received settings:', settings);
+    return settings;
   }
 
   /**

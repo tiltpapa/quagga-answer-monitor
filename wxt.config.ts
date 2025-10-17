@@ -19,6 +19,7 @@ export default defineConfig({
     side_panel: {
       default_path: 'sidepanel.html'
     },
+    options_page: 'options.html',
     // Chrome Web Store用のアイコン設定
     icons: {
       16: 'icon/16.png',
